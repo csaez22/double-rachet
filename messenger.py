@@ -49,6 +49,6 @@ class MessengerClient:
     def report(self, name, message):
         # Implement El-Gamal encryption for abuse report
         # Encrypt the report under the server;s public key
-        # Ensure the report includes the sender's name and message content
+        # Ensure the report includes the sender's name and message content 
         raise Exception("not implemented!")
         return
