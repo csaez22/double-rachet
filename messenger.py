@@ -1,7 +1,7 @@
 import os
 import pickle
 import string
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -70,8 +70,46 @@ class MessengerClient:
 
     def sendMessage(self, name, message):
         # Send an encrypted message to the user specified by 'name'
-        raise Exception("not implemented!")
-        return
+        if name not in self.conns:
+            # TODO session_init
+            self.session_init(name)
+        
+        session = self.conns[name]
+
+        # Prepare header: DH public key, Pn(length in prev sending chain), Ns(message number in sending chain)
+        header = {
+            'dh_pub': session['DHs'].public_key(),
+            'pn': session['Pn'],
+            'ns': session['Ns'],
+        }
+
+        # If CK isn't initialized, raise an error
+        if session['CKs'] is None:
+            raise ValueError("Sending chain key is not initialized.")
+        
+        serialized_header = pickle.dumps(header)
+
+        # The current chain key is passed to te KDF method to derive a new MK and the next CKs
+        CKs, MK = self.KDF_CK(session['CKs'])
+
+        #Encrypt the message using MK
+        aesgcm = AESGCM(MK)
+        # Unique random value for cryptographic use; Might not be allowed
+        nonce = os.urandom(12)
+        plaintext = message.encode('utf-8')
+        # aesgcm handles both confidentiality and integrity; no need for HMAC(See if Saez agrees)
+        ct = aesgcm.encrypt(nonce, plaintext, serialized_header)
+
+        #  Message number incremented
+        session['Ns'] += 1
+
+        # Prepare ciphertext components as hex strings for JSON serialization
+        ciphertext_dict = {
+            'nonce': nonce,
+            'ciphertext': ct
+        }
+
+        return header, ciphertext_dict
 
     def receiveMessage(self, name, header, ciphertext):
         # Receive and decrypt an encrypted message from the user specified by 'name'.
@@ -85,3 +123,75 @@ class MessengerClient:
         # This is sent and decrypted by the server
         raise Exception("not implemented!")
         return
+    
+    def session_init(self, name):
+        peer_cert = self.certs[name]
+        # Other person's publick key
+        DHr = peer_cert['public_key']
+        DHs = self.DH_priv
+
+        # Compute shared secret
+        shared_secret = self.DH_priv.exchange(ec.ECDH(), DHr)
+
+        # Root key
+        initial_RK = b'\x00' * 32
+
+        session_RK, CKs = self.KDF_RK(initial_RK, shared_secret)
+
+        # Initialize session state
+        session = {
+            'RK': session_RK,
+            'CKs': CKs,
+            'CKr': None,
+            'DHs': DHs,
+            'DHr': DHr,
+            'Ns': 0,
+            'Nr': 0,
+            'Pn': 0,
+        }
+
+        self.conns[name] = session
+
+    def KDF_CK(self,CK):
+        # From Docs 5.2
+        # KDF_CK(ck): HMAC [2] with SHA-256 or SHA-512 [8] is recommended,
+        # using ck as the HMAC key and using separate constants as input 
+        # (e.g. a single byte 0x01 as input to produce the message key, and a single byte 0x02 as input to produce the next chain key).
+
+
+        # Derive MK using HMAC with input 0x02
+        h_mk = hmac.HMAC(CK, hashes.SHA256())
+        h_mk.update(b'\x01')
+        MK = h_mk.finalize()
+
+        # Derive new_CK using HMAC with input 0x01
+        h_new_ck = hmac.HMAC(CK, hashes.SHA256())
+        h_new_ck.update(b'\x02')
+        new_CK = h_new_ck.finalize()
+
+        return new_CK, MK
+    
+    # Done in session init
+    def KDF_RK(self, RK, DH_out):
+        # From Docs 5.2:
+        # KDF_RK(rk, dh_out): HKDF [3] with SHA-256 or SHA-512 [8] is recommended,
+        # using rk as the salt, dh_out as the input keying material (IKM), and an application-specific byte sequences as HKDF info.
+        # Info value should be distinct from other uses of HKDF
+
+        # Is info distinct?
+        # I believe so because all the calls to the function are for the same purpose of
+        # deriving new Root Key and Chain Key
+        info = b'DoubleRatchetKDF_RK'
+
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=64,  # 32 bytes for RK and 32 bytes for CK
+            salt=RK,
+            info=info,
+        )
+
+        derived_keys = hkdf.derive(DH_out)
+        next_RK = derived_keys[:32]
+        CKs = derived_keys[32:]
+    
+        return next_RK, CKs
