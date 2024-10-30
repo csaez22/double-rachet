@@ -1,7 +1,7 @@
 import os
 import pickle
 import string
-from cryptography.hazmat.primitives import hashes, hmac
+from cryptography.hazmat.primitives import hashes, hmac, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -50,7 +50,11 @@ class MessengerClient:
 
     def generateCertificate(self):
         # Generate an initial DH name and key pair using curve P-256 which serves as a certificate
-        cert = {'name': self.name, 'public_key': self.DH_pub}
+        public_key_pem = self.DH_pub.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        cert = {'name': self.name, 'public_key': public_key_pem}
         return cert
 
     def receiveCertificate(self, certificate, signature):
@@ -65,8 +69,15 @@ class MessengerClient:
         # Docs for InvalidSignature: https://cryptography.io/en/latest/exceptions/#cryptography.exceptions.InvalidSignature
         except InvalidSignature:
             raise Exception("Invalid certificate signature")
-        # Store the validated certificate
-        self.certs[certificate['name']] = certificate
+        # Deserialize the public key from PEM bytes
+        public_key_pem = certificate['public_key']
+        peer_public_key = serialization.load_pem_public_key(public_key_pem)
+        
+        # Store the validated certificate with the deserialized public key
+        self.certs[certificate['name']] = {
+            'name': certificate['name'],
+            'public_key': peer_public_key
+        }
 
     def sendMessage(self, name, message):
         # Send an encrypted message to the user specified by 'name'
