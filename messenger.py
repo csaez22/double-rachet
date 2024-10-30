@@ -5,6 +5,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.exceptions import InvalidSignature
 
 class MessengerServer:
     def __init__(self, server_signing_key, server_decryption_key):
@@ -62,7 +63,7 @@ class MessengerClient:
             self.server_signing_pk.verify(signature, cert_bytes, ec.ECDSA(hashes.SHA256()))
         # need to find some way to catch this(InvalidSignature?) I found this via chatGPT but am unsure if that is allowed
         # Docs for InvalidSignature: https://cryptography.io/en/latest/exceptions/#cryptography.exceptions.InvalidSignature
-        except:
+        except InvalidSignature:
             raise Exception("Invalid certificate signature")
         # Store the validated certificate
         self.certs[certificate['name']] = certificate
