@@ -17,6 +17,7 @@ class MessengerServer:
         # - El-Gamal encryption is not provided by the cryptography library.
         # - We will implement it using available primitives (ECDH and AES-GCM).
         ct_dict = pickle.loads(ct)
+        # TODO: Implement El-Gamal decryption
 
     def signCert(self, cert):
         # Signs a certificate that is provided using server_signing_key
@@ -41,19 +42,30 @@ class MessengerClient:
         self.server_encryption_pk = server_encryption_pk
         self.conns = {}
         self.certs = {}
+        # Probably better here than in generateCertificate
+        # Docs for SECP256R1(P-256): https://cryptography.io/en/latest/hazmat/primitives/asymmetric/ec/ (About 1/3 of the way down the page, we're using 256 instead of 384)
+        self.DH_priv = ec.generate_private_key(ec.SECP256R1())
+        self.DH_pub = self.DH_priv.public_key()
 
     def generateCertificate(self):
-        # Generate an initial DH pair using curve P-256
-        # Gen certificate with name and public key
-        # Serialize the certificate
-        raise Exception("not implemented!")
-        return
+        # Generate an initial DH name and key pair using curve P-256 which serves as a certificate
+        cert = {'name': self.name, 'public_key': self.DH_pub}
+        return cert
 
     def receiveCertificate(self, certificate, signature):
         # Verify the server's signature on the certificate
         # Store the validated certificate and associated public key
-        raise Exception("not implemented!")
-        return
+        
+        cert_bytes = pickle.dumps(certificate)
+        # Verify the server's signature on the certificate
+        try:
+            self.server_signing_pk.verify(signature, cert_bytes, ec.ECDSA(hashes.SHA256()))
+        # need to find some way to catch this(InvalidSignature?) I found this via chatGPT but am unsure if that is allowed
+        # Docs for InvalidSignature: https://cryptography.io/en/latest/exceptions/#cryptography.exceptions.InvalidSignature
+        except:
+            raise Exception("Invalid certificate signature")
+        # Store the validated certificate
+        self.certs[certificate['name']] = certificate
 
     def sendMessage(self, name, message):
         # Send an encrypted message to the user specified by 'name'
@@ -69,7 +81,6 @@ class MessengerClient:
         # Implement El-Gamal encryption for abuse report
         # Encrypt the report under the server;s public key
         # Ensure the report includes the sender's name and message content
-        # Ensure the report includes the sender's name and message content 
-        # This is sent and decrypted by the server(I believe)
+        # This is sent and decrypted by the server
         raise Exception("not implemented!")
         return
