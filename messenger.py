@@ -119,8 +119,7 @@ class MessengerClient:
 
         #Encrypt the message using MK
         aesgcm = AESGCM(MK)
-        # Unique random value for cryptographic use; Is not allowed
-        nonce = session['Ns'].to_bytes(12, 'big')
+        nonce = 0
         plaintext = message.encode('utf-8')
         # aesgcm handles both confidentiality and integrity; no need for HMAC(See if Saez agrees)
         ct = aesgcm.encrypt(nonce, plaintext, serialized_header)
