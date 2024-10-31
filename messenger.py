@@ -108,6 +108,7 @@ class MessengerClient:
 
         #Encrypt the message using MK
         aesgcm = AESGCM(MK)
+        # Nonce is only used once on the key and keys keep changing
         nonce = 0
         plaintext = message.encode('utf-8')
         # aesgcm handles both confidentiality and integrity; no need for HMAC(See if Saez agrees)
@@ -141,27 +142,24 @@ class MessengerClient:
         # If the sender's public key doesn't match the one stored in the session; different sender
         # Time to enable to enable the ratchet
         if not DHr_sender.public_numbers() == session['DHr'].public_numbers():
-            # Update previous message chain length with 'current' chain length(since it is a new chain)
-            session['Pn'] = session['Ns']
-            session['Ns'] = 0
-            # Reset Chain Keys(new chain)
-            session['CKs'] = None
-            # Update the stored public key
-            prev_DHr = session['DHr']
-            session['DHr'] = DHr_sender
-
-            # Computes a shared secret via DH key exchange ECDH - Elliptic Curve Diffie Hellman
-            shared_secret = session['DHs'].exchange(ec.ECDH(), DHr_sender)
-            # updates root key and receiving key for forward secrecy
-            session['RK'], session['CKr'] = self.KDF_RK(session['RK'], shared_secret)
-
             # New sending key
-            session['DHs'] = ec.generate_private_key(ec.SECP256R1())
-
+            newDHs = ec.generate_private_key(ec.SECP256R1())
             # Computes a shared secret via DH key exchange ECDH - Elliptic Curve Diffie Hellman
             shared_secret = session['DHs'].exchange(ec.ECDH(), DHr_sender)
             # updates root key and sending chain key
             session['RK'], session['CKs'] = self.KDF_RK(session['RK'], shared_secret)
+            
+            # Update previous message chain length with 'current' chain length(since it is a new chain)
+            session['Pn'] = session['Ns']
+            session['Ns'] = 0
+            session['Nr'] = 0
+            session['DHr'] = DHr_sender
+            # updates root key and receiving key for forward secrecy
+            session['CKr'] = session['CKs']
+
+
+            # Computes a shared secret via DH key exchange ECDH - Elliptic Curve Diffie Hellman
+            shared_secret = session['DHs'].exchange(ec.ECDH(), DHr_sender)
         
         # Nothing to receive
         if session['CKr'] is None:
