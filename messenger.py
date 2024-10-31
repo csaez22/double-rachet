@@ -52,10 +52,13 @@ class MessengerClient:
 
     def generateCertificate(self):
         # Generate an initial DH name and key pair using curve P-256 which serves as a certificate
+        # Serialize the public key to PEM format
         public_key_pem = self.DH_pub.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
+        # This line below isn't working as opposed to the serialization method in the line above
+        # self.DH_pub = pickle.dumps(self.DH_pub.public_bytes())
         cert = {'name': self.name, 'public_key': public_key_pem}
         return cert
 
@@ -67,7 +70,6 @@ class MessengerClient:
         # Verify the server's signature on the certificate
         try:
             self.server_signing_pk.verify(signature, cert_bytes, ec.ECDSA(hashes.SHA256()))
-        # need to find some way to catch this(InvalidSignature?) I found this via chatGPT but am unsure if that is allowed
         # Docs for InvalidSignature: https://cryptography.io/en/latest/exceptions/#cryptography.exceptions.InvalidSignature
         except InvalidSignature:
             raise Exception("Invalid certificate signature")
@@ -106,8 +108,8 @@ class MessengerClient:
 
         #Encrypt the message using MK
         aesgcm = AESGCM(MK)
-        # Unique random value for cryptographic use; Might not be allowed
-        nonce = os.urandom(12)
+        # Unique random value for cryptographic use; Is not allowed
+        nonce = session['Ns'].to_bytes(12, 'big')
         plaintext = message.encode('utf-8')
         # aesgcm handles both confidentiality and integrity; no need for HMAC(See if Saez agrees)
         ct = aesgcm.encrypt(nonce, plaintext, serialized_header)
@@ -249,7 +251,7 @@ class MessengerClient:
         # Is info usage distinct?
         # I believe so because all the calls to the function are for the same purpose of
         # deriving new Root Key and Chain Key
-        info = b'DoubleRatchetKDF_RK'
+        info = None
 
         hkdf = HKDF(
             algorithm=hashes.SHA256(),
