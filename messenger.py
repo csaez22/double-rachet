@@ -18,7 +18,18 @@ class MessengerServer:
         # - El-Gamal encryption is not provided by the cryptography library.
         # - We will implement it using available primitives (ECDH and AES-GCM).
         ct_dict = pickle.loads(ct)
-        # TODO: Implement El-Gamal decryption
+        reporter_pk = ct_dict["reporter_pk"]
+        shared_secret = self.server_decryption_key.exchange(ec.ECDH(), reporter_pk)
+
+        reporter_pk_bytes = reporter_pk.public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        dec_key = hashes.SHA256(reporter_pk_bytes + shared_secret)
+        
+        aesgcm = AESGCM(dec_key)
+        plaintext = aesgcm.decrypt(b'A', ct_dict["ct"], None)
+        return plaintext.decode('utf-8')
 
     def signCert(self, cert):
         # Signs a certificate that is provided using server_signing_key
@@ -189,8 +200,25 @@ class MessengerClient:
         # Encrypt the report under the server;s public key
         # Ensure the report includes the sender's name and message content
         # This is sent and decrypted by the server
-        raise Exception("not implemented!")
-        return
+        _report = {"name": name, "message": message}
+        plaintext = _report.encode('utf-8')
+
+        ephemeral_sk = ec.generate_private_key(ec.SECP256R1())
+        ephemeral_pk = ephemeral_sk.public_key()
+        shared_secret = ephemeral_sk.exchange(ec.ECDH(), self.server_encryption_pk)
+        
+        ephemeral_pk_bytes = ephemeral_pk.public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        enc_key = hashes.SHA256(ephemeral_pk_bytes + shared_secret)
+        
+        aesgcm = AESGCM(enc_key)
+        ct = aesgcm.encrypt(b'A', plaintext, None) # NOTE: Nonce can be a constant and header can be none since we generate a new pk and sk each time
+
+        ct_dict = {"ct": ct, "reporter_pk": ephemeral_pk}
+
+        return ct_dict, plaintext
     
     def session_init(self, name):
         peer_cert = self.certs[name]
