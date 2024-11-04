@@ -16,26 +16,21 @@ class MessengerServer:
         # Decrypts and returns an abuse report using server_decryption_key
         # - Reported messages are encrypted with a CCA-secure variant of El-Gamal encryption.
         # - El-Gamal encryption is not provided by the cryptography library.
-        # - We will implement similar functionality using available primitives (HKDF and AES-GCM).
+        # - We will implement it using available primitives (ECDH and AES-GCM).
+        #   - ECDH = Elliptic-Curve Diffie-Hellman
         reporter_pk = ct["reporter_pk"]
-        reporter_pk = serialization.load_pem_public_key(reporter_pk)
         shared_secret = self.server_decryption_key.exchange(ec.ECDH(), reporter_pk)
-        kdf = HKDF(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=None,
-            info=b"ElGamalReportKey"
+        reporter_pk_bytes = reporter_pk.public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
-        key = kdf.derive(shared_secret)
-        aesgcm = AESGCM(key)
-        nonce = ct["nonce"]
-        try:
-            plaintext = aesgcm.decrypt(nonce, ct["ct"], None)
-            return plaintext
-        except Exception as e:
-            # Decryption failed (e.g., tampering detected)
-            print(f"Decryption failed: {e}")
-            return None
+        sha256 = hashes.Hash(hashes.SHA256())
+        sha256.update(reporter_pk_bytes + shared_secret)
+        dec_key = sha256.finalize()
+        
+        aesgcm = AESGCM(dec_key)
+        plaintext = aesgcm.decrypt(b'AAAAAAAA', ct["ct"], None)
+        return pickle.loads(plaintext)
 
     def signCert(self, cert):
         # Signs a certificate that is provided using server_signing_key
@@ -185,37 +180,28 @@ class MessengerClient:
 
     def report(self, name, message):
         # Implement El-Gamal encryption for abuse report
-        # Encrypt the report under the server's public key
+        # Encrypt the report under the server;s public key
         # Ensure the report includes the sender's name and message content
         # This is sent and decrypted by the server
-        _report = {"name": name, "message": message}
-        plaintext = pickle.dumps(_report)
-
+        _report = {"name": name, "message": message} # NOTE: This is the plaintext 
+        plaintext_bytes = pickle.dumps(_report)
         ephemeral_sk = ec.generate_private_key(ec.SECP256R1())
         ephemeral_pk = ephemeral_sk.public_key()
         shared_secret = ephemeral_sk.exchange(ec.ECDH(), self.server_encryption_pk)
-
-
-        hkdf = HKDF(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=None,
-            info=b"ElGamalReportKey",
-        )
-        enc_key = hkdf.derive(shared_secret)
         
-        aesgcm = AESGCM(enc_key)
-        nonce = os.urandom(12)
-        ct = aesgcm.encrypt(nonce, plaintext, None)
-        # Serialize the ephemeral public key to PEM format
-        reporter_pk_bytes = ephemeral_pk.public_bytes(
-            encoding=serialization.Encoding.PEM,
+        ephemeral_pk_bytes = ephemeral_pk.public_bytes(
+            encoding=serialization.Encoding.DER,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
-
-        ct_dict = {"ct": ct, "nonce": nonce, "reporter_pk": reporter_pk_bytes}
-
-        return plaintext, ct_dict
+        sha256 = hashes.Hash(hashes.SHA256())
+        sha256.update(ephemeral_pk_bytes + shared_secret)
+        enc_key = sha256.finalize()
+        
+        aesgcm = AESGCM(enc_key)
+        ct = aesgcm.encrypt(b'AAAAAAAA', plaintext_bytes, None) # NOTE: Nonce can be a constant and header can be None since we generate a new pk and sk each time
+        ct_dict = {"ct": ct, "reporter_pk": ephemeral_pk}
+        
+        return _report, ct_dict
     
     def session_init(self, name):
         peer_cert = self.certs[name]
