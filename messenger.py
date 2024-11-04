@@ -1,3 +1,5 @@
+# Brought to you by Christopher Sáez and Ian Bracken
+
 import os
 import pickle
 import string
