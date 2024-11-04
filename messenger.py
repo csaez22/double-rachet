@@ -180,7 +180,7 @@ class MessengerClient:
 
     def report(self, name, message):
         # Implement El-Gamal encryption for abuse report
-        # Encrypt the report under the server;s public key
+        # Encrypt the report under the server's public key
         # Ensure the report includes the sender's name and message content
         # This is sent and decrypted by the server
         _report = {"name": name, "message": message} # NOTE: This is the plaintext 
