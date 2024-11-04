@@ -16,33 +16,35 @@ class MessengerServer:
         # Decrypts and returns an abuse report using server_decryption_key
         # - Reported messages are encrypted with a CCA-secure variant of El-Gamal encryption.
         # - El-Gamal encryption is not provided by the cryptography library.
-        # - We will implement it using available primitives (ECDH and AES-GCM).
-        ct_dict = pickle.loads(ct)
-        reporter_pk = ct_dict["reporter_pk"]
+        # - We will implement similar functionality using available primitives (HKDF and AES-GCM).
+        reporter_pk = ct["reporter_pk"]
+        reporter_pk = serialization.load_pem_public_key(reporter_pk)
         shared_secret = self.server_decryption_key.exchange(ec.ECDH(), reporter_pk)
-
-        reporter_pk_bytes = reporter_pk.public_bytes(
-            encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        kdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=None,
+            info=b"ElGamalReportKey"
         )
-        dec_key = hashes.SHA256(reporter_pk_bytes + shared_secret)
-        
-        aesgcm = AESGCM(dec_key)
-        plaintext = aesgcm.decrypt(b'A', ct_dict["ct"], None)
-        return plaintext.decode('utf-8')
+        key = kdf.derive(shared_secret)
+        aesgcm = AESGCM(key)
+        nonce = ct["nonce"]
+        try:
+            plaintext = aesgcm.decrypt(nonce, ct["ct"], None)
+            return plaintext
+        except Exception as e:
+            # Decryption failed (e.g., tampering detected)
+            print(f"Decryption failed: {e}")
+            return None
 
     def signCert(self, cert):
         # Signs a certificate that is provided using server_signing_key
         # Signs the certificate with an ECDSA signature using SHA256
-        
-        # Serialize the certificate to bytes (e.g., using pickle)
         cert_bytes = pickle.dumps(cert)
-
         signature = self.server_signing_key.sign(
             cert_bytes,
             ec.ECDSA(hashes.SHA256())
         )
-
         # Return the signature
         return signature
 
@@ -68,8 +70,6 @@ class MessengerClient:
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
-        # This line below isn't working as opposed to the serialization method in the line above
-        # self.DH_pub = pickle.dumps(self.DH_pub.public_bytes())
         cert = {'name': self.name, 'public_key': public_key_pem}
         return cert
 
@@ -81,13 +81,11 @@ class MessengerClient:
         # Verify the server's signature on the certificate
         try:
             self.server_signing_pk.verify(signature, cert_bytes, ec.ECDSA(hashes.SHA256()))
-        # Docs for InvalidSignature: https://cryptography.io/en/latest/exceptions/#cryptography.exceptions.InvalidSignature
         except InvalidSignature:
             raise Exception("Invalid certificate signature")
         # Deserialize the public key from PEM bytes
         public_key_pem = certificate['public_key']
         peer_public_key = serialization.load_pem_public_key(public_key_pem)
-        
         # Store the validated certificate with the deserialized public key
         self.certs[certificate['name']] = {
             'name': certificate['name'],
@@ -97,13 +95,16 @@ class MessengerClient:
     def sendMessage(self, name, message):
         # Send an encrypted message to the user specified by 'name'
         if name not in self.conns:
-            self.session_init(name, True)
+            self.session_init(name)
         
         session = self.conns[name]
 
         # Prepare header: DH public key, Pn(length in prev sending chain), Ns(message number in sending chain)
         header = {
-            'dh_pub': session['DHs'].public_key(),
+            'dh_pub': session['DHs'].public_key().public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            ),
             'pn': session['Pn'],
             'ns': session['Ns'],
         }
@@ -111,26 +112,21 @@ class MessengerClient:
         # If CK isn't initialized, raise an error
         if session['CKs'] is None:
             raise ValueError("Sending chain key is not initialized.")
-        
         serialized_header = pickle.dumps(header)
 
         # The current chain key is passed to te KDF method to derive a new MK and the next CKs
         CKs, MK = self.KDF_CK(session['CKs'])
-
-        #Encrypt the message using MK
+        # Encrypt the message using MK
         aesgcm = AESGCM(MK)
-        # Nonce is only used once on the key and keys keep changing
-        nonce = 0
-        plaintext = message.encode('utf-8')
-        # aesgcm handles both confidentiality and integrity; no need for HMAC(See if Saez agrees)
+        # Nonce is only used once on the key and keys keep changing. No need to store it.
+        nonce = os.urandom(12)
+        plaintext = pickle.dumps(message)
+        # aesgcm handles both confidentiality and integrity;
         ct = aesgcm.encrypt(nonce, plaintext, serialized_header)
-
         #  Message number incremented
         session['Ns'] += 1
         # Sending chain key updated
         session['CKs'] = CKs
-
-        # Prepare ciphertext components as hex strings for JSON serialization
         ciphertext_dict = {
             'nonce': nonce,
             'ciphertext': ct
@@ -141,7 +137,7 @@ class MessengerClient:
     def receiveMessage(self, name, header, ciphertext):
         # Receive and decrypt an encrypted message from the user specified by 'name'.
         if name not in self.conns:
-            self.session_init(name,False)
+            self.session_init(name)
         session = self.conns[name]
 
         # Deserialize the header
@@ -149,28 +145,21 @@ class MessengerClient:
 
         # Sender's DH public key from header
         DHr_sender = header['dh_pub']
+        DHr_sender = serialization.load_pem_public_key(DHr_sender)
 
-        # If the sender's public key doesn't match the one stored in the session; different sender
-        # Time to enable to enable the ratchet
+
+        # Check if sender's DH public key has changed (ratchet)
         if not DHr_sender.public_numbers() == session['DHr'].public_numbers():
-            # New sending key
+            # Perform ratchet
             newDHs = ec.generate_private_key(ec.SECP256R1())
-            # Computes a shared secret via DH key exchange ECDH - Elliptic Curve Diffie Hellman
-            shared_secret = session['DHs'].exchange(ec.ECDH(), DHr_sender)
-            # updates root key and sending chain key
+            shared_secret = newDHs.exchange(ec.ECDH(), DHr_sender)
             session['RK'], session['CKs'] = self.KDF_RK(session['RK'], shared_secret)
-            
-            # Update previous message chain length with 'current' chain length(since it is a new chain)
             session['Pn'] = session['Ns']
             session['Ns'] = 0
             session['Nr'] = 0
+            session['DHs'] = newDHs
             session['DHr'] = DHr_sender
-            # updates root key and receiving key for forward secrecy
             session['CKr'] = session['CKs']
-
-
-            # Computes a shared secret via DH key exchange ECDH - Elliptic Curve Diffie Hellman
-            shared_secret = session['DHs'].exchange(ec.ECDH(), DHr_sender)
         
         # Nothing to receive
         if session['CKr'] is None:
@@ -184,11 +173,10 @@ class MessengerClient:
         aesgcm = AESGCM(MK)
         try:
             plaintext = aesgcm.decrypt(ciphertext['nonce'], ciphertext['ciphertext'], serialized_header)
-            message = plaintext.decode('utf-8')
+            message = pickle.loads(plaintext)
         except Exception as e:
             # Tampering detected
             return None
-
         # Update Nr number received
         session['Nr'] += 1
 
@@ -197,28 +185,37 @@ class MessengerClient:
 
     def report(self, name, message):
         # Implement El-Gamal encryption for abuse report
-        # Encrypt the report under the server;s public key
+        # Encrypt the report under the server's public key
         # Ensure the report includes the sender's name and message content
         # This is sent and decrypted by the server
         _report = {"name": name, "message": message}
-        plaintext = _report.encode('utf-8')
+        plaintext = pickle.dumps(_report)
 
         ephemeral_sk = ec.generate_private_key(ec.SECP256R1())
         ephemeral_pk = ephemeral_sk.public_key()
         shared_secret = ephemeral_sk.exchange(ec.ECDH(), self.server_encryption_pk)
-        
-        ephemeral_pk_bytes = ephemeral_pk.public_bytes(
-            encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
+
+
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=None,
+            info=b"ElGamalReportKey",
         )
-        enc_key = hashes.SHA256(ephemeral_pk_bytes + shared_secret)
+        enc_key = hkdf.derive(shared_secret)
         
         aesgcm = AESGCM(enc_key)
-        ct = aesgcm.encrypt(b'A', plaintext, None) # NOTE: Nonce can be a constant and header can be none since we generate a new pk and sk each time
+        nonce = os.urandom(12)
+        ct = aesgcm.encrypt(nonce, plaintext, None)
+        # Serialize the ephemeral public key to PEM format
+        reporter_pk_bytes = ephemeral_pk.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
 
-        ct_dict = {"ct": ct, "reporter_pk": ephemeral_pk}
+        ct_dict = {"ct": ct, "nonce": nonce, "reporter_pk": reporter_pk_bytes}
 
-        return ct_dict, plaintext
+        return plaintext, ct_dict
     
     def session_init(self, name):
         peer_cert = self.certs[name]
@@ -252,8 +249,7 @@ class MessengerClient:
         # KDF_CK(ck): HMAC [2] with SHA-256 or SHA-512 [8] is recommended,
         # using ck as the HMAC key and using separate constants as input 
         # (e.g. a single byte 0x01 as input to produce the message key, and a single byte 0x02 as input to produce the next chain key).
-
-
+        
         # Derive MK using HMAC with input 0x02
         h_mk = hmac.HMAC(CK, hashes.SHA256())
         h_mk.update(b'\x01')
@@ -266,16 +262,12 @@ class MessengerClient:
 
         return new_CK, MK
     
-    # Done in session init
+    # Used in session init
     def KDF_RK(self, RK, DH_out):
         # From Docs 5.2:
         # KDF_RK(rk, dh_out): HKDF [3] with SHA-256 or SHA-512 [8] is recommended,
         # using rk as the salt, dh_out as the input keying material (IKM), and an application-specific byte sequences as HKDF info.
         # Info value should be distinct from other uses of HKDF
-
-        # Is info usage distinct?
-        # I believe so because all the calls to the function are for the same purpose of
-        # deriving new Root Key and Chain Key
         info = None
 
         hkdf = HKDF(
